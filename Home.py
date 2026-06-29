@@ -1196,12 +1196,11 @@ with st.sidebar:
     if custom_url_requires_confirmation:
         st.warning(
             "This SPEEDHOME rent URL is not in the built-in suggestion list. "
-            "It may be a new valid SPEEDHOME page or a typo. Confirm before scraping."
+            "To avoid long no-result scrapes from typo or non-existent URLs in the public app, "
+            "unlisted custom rent URLs are blocked before scraping. Please choose a suggested area/apartment "
+            "or paste a SPEEDHOME /rent URL that matches one of the built-in suggestions."
         )
-        st.checkbox(
-            "I understand, continue with this custom SPEEDHOME rent URL",
-            key="search_input_custom_url_confirmed",
-        )
+        st.session_state["search_input_custom_url_confirmed"] = False
 
     st.info("Scraper uses robots.txt check, reasonable request delay, and local cache fallback.")
 
@@ -1239,9 +1238,8 @@ with st.sidebar:
     scrape_crawl_mode = "deeper"
 
     main_scrape_busy = bool(st.session_state.get("main_scrape_in_progress"))
-    custom_url_confirmed = bool(st.session_state.get("search_input_custom_url_confirmed", False))
     search_input_ready = bool(st.session_state.get("search_input_is_valid", False))
-    custom_url_ready = (not custom_url_requires_confirmation) or custom_url_confirmed
+    custom_url_ready = not custom_url_requires_confirmation
     analyze_button_disabled = (not search_input_ready) or (not custom_url_ready)
 
     analyze_clicked = False
@@ -1304,12 +1302,12 @@ if st.session_state.pop("main_scrape_start_requested", False):
         st.session_state["main_scrape_in_progress"] = False
         st.stop()
 
-    if (
-        st.session_state.get("search_input_custom_url_requires_confirmation", False)
-        and not st.session_state.get("search_input_custom_url_confirmed", False)
-    ):
+    if st.session_state.get("search_input_custom_url_requires_confirmation", False):
         clear_analysis_state()
-        st.warning("Please confirm the custom SPEEDHOME rent URL before scraping.")
+        st.warning(
+            "This custom SPEEDHOME rent URL is outside the built-in validated target list, so scraping was not started. "
+            "Please choose a suggested area/apartment or paste a SPEEDHOME /rent URL that matches one of the built-in suggestions."
+        )
         st.session_state["main_scrape_in_progress"] = False
         st.stop()
 
