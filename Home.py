@@ -1197,13 +1197,11 @@ with st.sidebar:
         st.warning(
             "This SPEEDHOME rent URL is not in the built-in suggestion list. "
             "It may be a new valid SPEEDHOME page or a typo. Confirm before scraping. "
-            "If the page does not expose any public listing cards, the scraper will stop early and show diagnostics."
+            "If the page renders broad fallback listings instead of a reliable target dataset, the app will reject it."
         )
-        st.session_state["search_input_custom_url_confirmed"] = bool(
-            st.checkbox(
-                "I understand, continue with this custom SPEEDHOME rent URL",
-                key="search_input_custom_url_confirmed_checkbox",
-            )
+        st.checkbox(
+            "I understand, continue with this custom SPEEDHOME rent URL",
+            key="search_input_custom_url_confirmed",
         )
 
     st.info("Scraper uses robots.txt check, reasonable request delay, and local cache fallback.")
@@ -1243,9 +1241,8 @@ with st.sidebar:
 
     main_scrape_busy = bool(st.session_state.get("main_scrape_in_progress"))
     search_input_ready = bool(st.session_state.get("search_input_is_valid", False))
-    custom_url_ready = (
-        not custom_url_requires_confirmation
-        or bool(st.session_state.get("search_input_custom_url_confirmed", False))
+    custom_url_ready = (not custom_url_requires_confirmation) or bool(
+        st.session_state.get("search_input_custom_url_confirmed", False)
     )
     analyze_button_disabled = (not search_input_ready) or (not custom_url_ready)
 

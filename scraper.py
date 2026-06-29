@@ -272,58 +272,17 @@ def detect_likely_concatenated_suggestion_typo(value: str) -> Optional[str]:
     return None
 
 
-def _listing_has_target_slug_evidence(listing: Dict, target_slug: str) -> bool:
-    """Return True when a parsed listing explicitly references the requested rent slug.
-
-    Built-in suggestions are only UX helpers, not a scraping whitelist. For
-    unlisted custom rent URLs, however, we still need to avoid accepting broad
-    fallback cards that SPEEDHOME may render for typo/non-existent slugs. This
-    helper checks only listing-level evidence, not page headings, because a fake
-    page can still print the requested slug in the heading while showing broad
-    unrelated cards underneath.
-    """
-    target_slug = str(target_slug or "").strip().lower()
-
-    if not target_slug:
-        return False
-
-    source_area = str(listing.get("source_area") or "").strip().lower()
-    property_area = str(listing.get("property_area") or "").strip()
-
-    property_text = ""
-    if property_area and property_area.lower() != source_area:
-        property_text = property_area
-
-    combined = " ".join(
-        [
-            str(listing.get("title") or ""),
-            property_text,
-            str(listing.get("listing_url") or ""),
-            str(listing.get("raw_text") or ""),
-        ]
-    )
-
-    combined_slug = _slugify_area(combined)
-    return bool(target_slug and target_slug in combined_slug)
-
-
-def _count_target_slug_evidence(listings: List[Dict], target_slug: str) -> int:
-    return sum(1 for listing in (listings or []) if _listing_has_target_slug_evidence(listing, target_slug))
 
 
 def _custom_url_broad_fallback_guard(url: str, listings: List[Dict], metadata: Optional[Dict] = None) -> Tuple[bool, Dict[str, Any]]:
-    """Detect custom rent URLs that render broad fallback listing cards.
+    """Reject broad fallback results for unlisted custom SPEEDHOME rent URLs.
 
-    This does not block custom SPEEDHOME /rent URLs. It only rejects a suspicious
-    result after the page has rendered when all of these are true:
-    - the slug is outside the built-in suggestion list,
-    - SPEEDHOME exposes a very small target count,
-    - the rendered direct listing cards greatly exceed that count, and
-    - none of the listing cards carry explicit evidence for the requested slug.
-
-    Example guarded case: /rent/new-area-2 may show a heading count of 2 but
-    render hundreds of broad cards unrelated to `new-area-2`. Accepting those
-    rows would be worse than a fast, honest no-result diagnostic.
+    AREA_SUGGESTIONS is only a UX helper, not a scraping whitelist. Custom
+    SPEEDHOME /rent/<slug> URLs are allowed. However, SPEEDHOME can render a
+    broad fallback result set for typo/non-existent slugs, for example showing
+    hundreds of unrelated direct listing cards while the page headline reports
+    only a very small target count. That should be treated as an invalid target,
+    not as market data.
     """
     metadata = metadata or {}
 
@@ -332,42 +291,35 @@ def _custom_url_broad_fallback_guard(url: str, listings: List[Dict], metadata: O
     except Exception:
         custom_outside_suggestions = False
 
-    try:
-        target_slug = get_speedhome_rent_slug(url)
-    except Exception:
-        target_slug = ""
-
     rendered_count = len(listings or [])
-    reported_total = metadata.get("source_reported_total_count")
 
     try:
+        reported_total = metadata.get("source_reported_total_count")
         reported_total = int(reported_total) if reported_total is not None else None
     except Exception:
         reported_total = None
 
-    evidence_count = _count_target_slug_evidence(listings or [], target_slug)
-
     threshold = None
     if reported_total is not None:
-        threshold = max(25, reported_total * 5)
+        # A true target with 1-10 reported results should not render hundreds of
+        # unrelated cards. Use a generous threshold so valid custom pages remain
+        # allowed, while obvious fallback pages are rejected.
+        threshold = max(25, reported_total * 10)
 
     suspicious = bool(
         custom_outside_suggestions
-        and rendered_count > 0
-        and evidence_count == 0
         and reported_total is not None
+        and reported_total <= 10
         and rendered_count > threshold
     )
 
-    guard_metadata = {
+    return suspicious, {
         "custom_url_outside_suggestions": bool(custom_outside_suggestions),
-        "custom_url_target_slug": target_slug,
-        "custom_url_target_evidence_count": int(evidence_count),
+        "custom_url_reported_total": reported_total,
+        "custom_url_rendered_count": rendered_count,
         "custom_url_broad_fallback_threshold": threshold,
         "custom_url_broad_fallback_suspected": bool(suspicious),
     }
-
-    return suspicious, guard_metadata
 
 
 def _same_rent_target(requested_url: str, final_url: str) -> bool:
@@ -583,7 +535,6 @@ def _fetch_with_playwright(url: str, crawl_mode: str = "quick") -> Tuple[str, Di
         unique_detail_links_seen: set = set()
         scroll_rounds_completed = 0
         clicked_load_more_count = 0
-        custom_url_guard_metadata: Dict[str, Any] = {}
 
         def _summarize_response_payload(response_url: str, status: Any, content_type: str, text: str) -> Dict[str, Any]:
             text = text or ""
@@ -913,47 +864,12 @@ def _fetch_with_playwright(url: str, crawl_mode: str = "quick") -> Tuple[str, Di
                 page_urls_fetched.append(page.url)
 
                 current_links = get_detail_links_on_page()
-                current_detail_count = len(set(current_links))
-                page_detail_counts.append(current_detail_count)
+                page_detail_counts.append(len(set(current_links)))
                 for link in current_links:
                     if link:
                         unique_detail_links_seen.add(str(link).split("?")[0].split("#")[0].rstrip("/"))
 
                 new_links_added = len(unique_detail_links_seen) - before_unique_count
-
-                # Fail fast for non-existent or empty custom /rent/<slug> pages.
-                # The autocomplete list is not a whitelist: custom SPEEDHOME rent
-                # URLs are still allowed. However, if the first rendered result
-                # page exposes zero direct /details/ listing links after waiting
-                # and scrolling, numeric pagination would only waste several
-                # minutes on typo/non-existent slugs.
-                if page_number == 1 and current_detail_count == 0:
-                    pagination_stop_reason = "first_page_no_direct_listing_links"
-                    break
-
-                # Some invalid custom slugs can render a broad fallback set of
-                # unrelated cards instead of an empty page. Detect this after
-                # the first rendered page so the app does not crawl hundreds of
-                # source-page cards for a typo/non-existent market target.
-                if page_number == 1 and is_direct_speedhome_rent_url_outside_suggestions(url):
-                    try:
-                        first_page_listings, first_page_parser_metadata = _parse_speedhome_listings_with_metadata(
-                            html=current_html,
-                            source_url=url,
-                            captured_json_payload_texts=captured_json_payloads,
-                        )
-                        suspected, guard_metadata = _custom_url_broad_fallback_guard(
-                            url,
-                            first_page_listings,
-                            first_page_parser_metadata,
-                        )
-                        custom_url_guard_metadata = guard_metadata
-
-                        if suspected:
-                            pagination_stop_reason = "custom_url_first_page_broad_fallback_suspected"
-                            break
-                    except Exception:
-                        pass
 
                 if new_links_added <= 0:
                     consecutive_no_new_pages += 1
@@ -1017,9 +933,6 @@ def _fetch_with_playwright(url: str, crawl_mode: str = "quick") -> Tuple[str, Di
         "playwright_page_detail_counts": page_detail_counts[:20],
         "playwright_numeric_pagination_enabled": bool(is_deeper_crawl),
         "playwright_pagination_stop_reason": pagination_stop_reason,
-        "playwright_custom_url_guard": custom_url_guard_metadata,
-        "custom_url_broad_fallback_suspected_first_page": bool(custom_url_guard_metadata.get("custom_url_broad_fallback_suspected")),
-        "custom_url_target_evidence_count_first_page": custom_url_guard_metadata.get("custom_url_target_evidence_count"),
         "_captured_json_payloads": captured_json_payloads,
         "_debug_json_records": debug_json_records_sorted,
         "_candidate_response_urls": candidate_response_urls,
@@ -2968,10 +2881,11 @@ def scrape_speedhome_with_metadata(user_input: str, use_cache: bool = True, craw
             if cached_suspected:
                 metadata.update(cached_guard_metadata)
                 metadata["notes"].append(
-                    "Ignored cached custom URL result because it looks like broad fallback cards for an unlisted or invalid rent slug."
+                    "Ignored cached custom URL result because it looks like a broad fallback dataset for an unlisted or invalid rent slug."
                 )
             else:
                 lookup_seconds = max(0.0, time.perf_counter() - scrape_started_perf)
+                cached_metadata.update(cached_guard_metadata)
                 cached_metadata["cache_used"] = True
                 cached_metadata["fetch_method"] = cached_metadata.get("fetch_method", "cache")
                 cached_metadata["cache_retrieved_at"] = datetime.now().isoformat(timespec="seconds")
@@ -2987,7 +2901,7 @@ def scrape_speedhome_with_metadata(user_input: str, use_cache: bool = True, craw
 
                 return cached_listings, cached_metadata
 
-        metadata["notes"].append("Existing empty or invalid cache entry ignored; refetching page.")
+        metadata["notes"].append("Existing empty cache entry ignored; refetching page.")
 
     allowed, robots_url, robots_policy_source = _robots_allowed(url)
 
@@ -3074,9 +2988,8 @@ def scrape_speedhome_with_metadata(user_input: str, use_cache: bool = True, craw
 
     if suspected_broad_fallback:
         metadata["notes"].append(
-            "Custom rent URL broad-fallback guard triggered: SPEEDHOME exposed a small reported target count, "
-            "but the rendered direct listing cards greatly exceeded that count and none of the listing cards "
-            "contained explicit evidence for the requested custom slug. No unrelated fallback dataset was accepted or cached."
+            "Custom rent URL broad-fallback guard triggered: SPEEDHOME reported a very small target count, "
+            "but rendered a much larger set of direct listing cards. No unrelated fallback dataset was accepted or cached."
         )
         metadata = _apply_live_scrape_timing(metadata)
         raise SpeedhomeFetchError(
@@ -3145,11 +3058,6 @@ def scrape_speedhome_with_metadata(user_input: str, use_cache: bool = True, craw
 
         _save_cache(cache)
     else:
-        if metadata.get("playwright_pagination_stop_reason") == "first_page_no_direct_listing_links":
-            metadata["notes"].append(
-                "No direct /details/ listing links were found on the first rendered result page. "
-                "The app stopped early to avoid long no-result pagination for a likely empty, typo, or non-existent rent URL."
-            )
         metadata["notes"].append("No listings parsed. Empty result was not cached.")
 
     return listings, metadata

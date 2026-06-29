@@ -620,7 +620,7 @@ def render_custom_url_confirmation(selected_target_key: str) -> bool:
     st.warning(
         "This SPEEDHOME rent URL is not in the built-in suggestion list. "
         "It may be a new valid SPEEDHOME page or a typo. Confirm before scraping. "
-        "If the page does not expose any public listing cards, the scraper will stop early and show diagnostics."
+        "If the page renders broad fallback listings instead of a reliable target dataset, the app will reject it."
     )
 
     return bool(
@@ -854,6 +854,29 @@ def scrape_area_for_comparison(input_value: str, crawl_mode: str, enrich_missing
     coverage_label = reconciliation.get("coverage_confidence")
     coverage_note = reconciliation.get("note")
     rendered_status = reconciliation.get("status")
+
+    if is_direct_speedhome_rent_url_outside_suggestions(input_value):
+        strong_count = 0
+        if "target_area_match" in target_df.columns:
+            strong_count = int((target_df["target_area_match"].fillna("") == "Strong").sum())
+
+        threshold = max(25, int(reported_total or 0) * 10) if reported_total else None
+
+        if reported_total is not None and int(reported_total) <= 10 and len(target_df) > threshold and strong_count == 0:
+            metadata = dict(metadata or {})
+            metadata["custom_url_broad_fallback_suspected"] = True
+            metadata["custom_url_reported_total"] = reported_total
+            metadata["custom_url_rendered_count"] = len(target_df)
+            metadata["custom_url_strong_target_evidence_count"] = strong_count
+            metadata.setdefault("notes", []).append(
+                "Custom rent URL broad-fallback guard triggered: rendered cards greatly exceeded the small SPEEDHOME-reported target count, "
+                "and no listing card had strong evidence for the requested custom slug."
+            )
+            raise SpeedhomeFetchError(
+                "This custom SPEEDHOME rent URL appears to render broader fallback listings instead of a reliable target dataset. "
+                "Please verify the URL slug or choose a suggested area/apartment. No unrelated listing dataset was reused.",
+                metadata=metadata,
+            )
 
     target_df["comparison_area"] = target_area
     target_df["comparison_source_url"] = source_url
@@ -1579,7 +1602,7 @@ with left_col:
             st.warning("Please choose a valid Area A suggestion or paste a supported SPEEDHOME rent URL.")
         elif not area_a_custom_url_ready:
             st.session_state["comparison_area_a_scrape_in_progress"] = False
-            st.warning("Please confirm the custom SPEEDHOME rent URL for Area A before scraping.")
+            st.warning("Please choose a valid Area A suggestion or supported SPEEDHOME rent URL before scraping.")
         elif not area_a_input or not str(area_a_input).strip():
             st.session_state["comparison_area_a_scrape_in_progress"] = False
             st.warning("Area A input cannot be empty.")
@@ -1703,7 +1726,7 @@ with right_col:
             st.warning("Please choose a valid Area B suggestion or paste a supported SPEEDHOME rent URL.")
         elif not area_b_custom_url_ready:
             st.session_state["comparison_area_b_scrape_in_progress"] = False
-            st.warning("Please confirm the custom SPEEDHOME rent URL for Area B before scraping.")
+            st.warning("Please choose a valid Area B suggestion or supported SPEEDHOME rent URL before scraping.")
         elif not area_b_input or not str(area_b_input).strip():
             st.session_state["comparison_area_b_scrape_in_progress"] = False
             st.warning("Area B input cannot be empty.")
