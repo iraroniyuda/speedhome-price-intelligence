@@ -1,0 +1,43 @@
+﻿# Python cache
+__pycache__/
+*.py[cod]
+*.class
+
+# Virtual environments
+venv/
+.venv/
+.venv_clean/
+env/
+ENV/
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# Streamlit local runtime/secrets
+.streamlit/secrets.toml
+
+# Local exports / generated downloads
+exports/
+*.xlsx
+*.csv
+*.zip
+
+# Keep source-controlled fallback data
+!data/speedhome_cache.json
+!data/scrape_history.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Test/cache artifacts
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Misc local files
+pip-freeze.txt

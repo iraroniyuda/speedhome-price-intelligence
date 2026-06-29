@@ -1,0 +1,11 @@
+﻿streamlit
+streamlit-searchbox
+pandas
+numpy
+requests
+beautifulsoup4
+lxml
+plotly
+openpyxl
+xlsxwriter
+playwright
