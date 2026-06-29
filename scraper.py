@@ -1,5 +1,7 @@
 import json
 import re
+import subprocess
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -17,6 +19,100 @@ DEFAULT_DELAY_SECONDS = 1.5
 
 DETAIL_ENRICH_DELAY_SECONDS = 0.75
 DETAIL_ENRICH_MAX_LISTINGS = 60
+
+
+PLAYWRIGHT_CHROMIUM_INSTALL_ATTEMPTED = False
+
+
+def _looks_like_missing_playwright_browser(exc: Exception) -> bool:
+    """Detect the common Streamlit Cloud error where Playwright is installed but Chromium is not."""
+    error_text = str(exc or "")
+    markers = [
+        "Executable doesn't exist",
+        "Please run the following command to download new browsers",
+        "playwright install",
+        "Looks like Playwright was just installed or updated",
+        "ms-playwright/chromium",
+    ]
+    return any(marker in error_text for marker in markers)
+
+
+def _install_playwright_chromium_once() -> Dict[str, Any]:
+    """Install the Playwright Chromium browser binary once per app process.
+
+    Streamlit Cloud installs Python packages from requirements.txt, but the
+    browser binary may not exist in /home/appuser/.cache/ms-playwright. When a
+    live scrape needs browser rendering, this lightweight fallback downloads
+    Chromium on demand instead of failing immediately.
+    """
+    global PLAYWRIGHT_CHROMIUM_INSTALL_ATTEMPTED
+
+    if PLAYWRIGHT_CHROMIUM_INSTALL_ATTEMPTED:
+        return {
+            "attempted": False,
+            "success": False,
+            "note": "Playwright Chromium install was already attempted in this app process.",
+        }
+
+    PLAYWRIGHT_CHROMIUM_INSTALL_ATTEMPTED = True
+
+    started = time.perf_counter()
+
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+
+        duration = round(time.perf_counter() - started, 2)
+
+        return {
+            "attempted": True,
+            "success": result.returncode == 0,
+            "returncode": result.returncode,
+            "duration_seconds": duration,
+            "stdout_tail": (result.stdout or "")[-1200:],
+            "stderr_tail": (result.stderr or "")[-1200:],
+        }
+
+    except Exception as install_exc:
+        duration = round(time.perf_counter() - started, 2)
+        return {
+            "attempted": True,
+            "success": False,
+            "duration_seconds": duration,
+            "error": str(install_exc),
+        }
+
+
+def _launch_playwright_chromium(playwright):
+    """Launch Chromium, installing the browser binary on demand if needed."""
+    launch_kwargs = {
+        "headless": True,
+        "args": [
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-blink-features=AutomationControlled",
+        ],
+    }
+
+    try:
+        return playwright.chromium.launch(**launch_kwargs)
+    except Exception as exc:
+        if not _looks_like_missing_playwright_browser(exc):
+            raise
+
+        install_result = _install_playwright_chromium_once()
+
+        if install_result.get("success"):
+            return playwright.chromium.launch(**launch_kwargs)
+
+        raise RuntimeError(
+            "Playwright Chromium browser is missing and automatic installation failed. "
+            f"Install result: {install_result}"
+        ) from exc
 
 
 # UI suggestions only.
@@ -362,14 +458,7 @@ def _fetch_with_playwright(url: str, crawl_mode: str = "quick") -> Tuple[str, Di
     scroll_wait_ms = 1300 if is_deeper_crawl else 1000
 
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-blink-features=AutomationControlled",
-            ],
-        )
+        browser = _launch_playwright_chromium(playwright)
 
         context = browser.new_context(
             user_agent=(
