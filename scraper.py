@@ -272,6 +272,104 @@ def detect_likely_concatenated_suggestion_typo(value: str) -> Optional[str]:
     return None
 
 
+def _listing_has_target_slug_evidence(listing: Dict, target_slug: str) -> bool:
+    """Return True when a parsed listing explicitly references the requested rent slug.
+
+    Built-in suggestions are only UX helpers, not a scraping whitelist. For
+    unlisted custom rent URLs, however, we still need to avoid accepting broad
+    fallback cards that SPEEDHOME may render for typo/non-existent slugs. This
+    helper checks only listing-level evidence, not page headings, because a fake
+    page can still print the requested slug in the heading while showing broad
+    unrelated cards underneath.
+    """
+    target_slug = str(target_slug or "").strip().lower()
+
+    if not target_slug:
+        return False
+
+    source_area = str(listing.get("source_area") or "").strip().lower()
+    property_area = str(listing.get("property_area") or "").strip()
+
+    property_text = ""
+    if property_area and property_area.lower() != source_area:
+        property_text = property_area
+
+    combined = " ".join(
+        [
+            str(listing.get("title") or ""),
+            property_text,
+            str(listing.get("listing_url") or ""),
+            str(listing.get("raw_text") or ""),
+        ]
+    )
+
+    combined_slug = _slugify_area(combined)
+    return bool(target_slug and target_slug in combined_slug)
+
+
+def _count_target_slug_evidence(listings: List[Dict], target_slug: str) -> int:
+    return sum(1 for listing in (listings or []) if _listing_has_target_slug_evidence(listing, target_slug))
+
+
+def _custom_url_broad_fallback_guard(url: str, listings: List[Dict], metadata: Optional[Dict] = None) -> Tuple[bool, Dict[str, Any]]:
+    """Detect custom rent URLs that render broad fallback listing cards.
+
+    This does not block custom SPEEDHOME /rent URLs. It only rejects a suspicious
+    result after the page has rendered when all of these are true:
+    - the slug is outside the built-in suggestion list,
+    - SPEEDHOME exposes a very small target count,
+    - the rendered direct listing cards greatly exceed that count, and
+    - none of the listing cards carry explicit evidence for the requested slug.
+
+    Example guarded case: /rent/new-area-2 may show a heading count of 2 but
+    render hundreds of broad cards unrelated to `new-area-2`. Accepting those
+    rows would be worse than a fast, honest no-result diagnostic.
+    """
+    metadata = metadata or {}
+
+    try:
+        custom_outside_suggestions = is_direct_speedhome_rent_url_outside_suggestions(url)
+    except Exception:
+        custom_outside_suggestions = False
+
+    try:
+        target_slug = get_speedhome_rent_slug(url)
+    except Exception:
+        target_slug = ""
+
+    rendered_count = len(listings or [])
+    reported_total = metadata.get("source_reported_total_count")
+
+    try:
+        reported_total = int(reported_total) if reported_total is not None else None
+    except Exception:
+        reported_total = None
+
+    evidence_count = _count_target_slug_evidence(listings or [], target_slug)
+
+    threshold = None
+    if reported_total is not None:
+        threshold = max(25, reported_total * 5)
+
+    suspicious = bool(
+        custom_outside_suggestions
+        and rendered_count > 0
+        and evidence_count == 0
+        and reported_total is not None
+        and rendered_count > threshold
+    )
+
+    guard_metadata = {
+        "custom_url_outside_suggestions": bool(custom_outside_suggestions),
+        "custom_url_target_slug": target_slug,
+        "custom_url_target_evidence_count": int(evidence_count),
+        "custom_url_broad_fallback_threshold": threshold,
+        "custom_url_broad_fallback_suspected": bool(suspicious),
+    }
+
+    return suspicious, guard_metadata
+
+
 def _same_rent_target(requested_url: str, final_url: str) -> bool:
     try:
         return get_speedhome_rent_slug(requested_url) == get_speedhome_rent_slug(final_url)
@@ -485,6 +583,7 @@ def _fetch_with_playwright(url: str, crawl_mode: str = "quick") -> Tuple[str, Di
         unique_detail_links_seen: set = set()
         scroll_rounds_completed = 0
         clicked_load_more_count = 0
+        custom_url_guard_metadata: Dict[str, Any] = {}
 
         def _summarize_response_payload(response_url: str, status: Any, content_type: str, text: str) -> Dict[str, Any]:
             text = text or ""
@@ -827,10 +926,34 @@ def _fetch_with_playwright(url: str, crawl_mode: str = "quick") -> Tuple[str, Di
                 # URLs are still allowed. However, if the first rendered result
                 # page exposes zero direct /details/ listing links after waiting
                 # and scrolling, numeric pagination would only waste several
-                # minutes on typo/non-existent slugs such as /rent/new-area-2.
+                # minutes on typo/non-existent slugs.
                 if page_number == 1 and current_detail_count == 0:
                     pagination_stop_reason = "first_page_no_direct_listing_links"
                     break
+
+                # Some invalid custom slugs can render a broad fallback set of
+                # unrelated cards instead of an empty page. Detect this after
+                # the first rendered page so the app does not crawl hundreds of
+                # source-page cards for a typo/non-existent market target.
+                if page_number == 1 and is_direct_speedhome_rent_url_outside_suggestions(url):
+                    try:
+                        first_page_listings, first_page_parser_metadata = _parse_speedhome_listings_with_metadata(
+                            html=current_html,
+                            source_url=url,
+                            captured_json_payload_texts=captured_json_payloads,
+                        )
+                        suspected, guard_metadata = _custom_url_broad_fallback_guard(
+                            url,
+                            first_page_listings,
+                            first_page_parser_metadata,
+                        )
+                        custom_url_guard_metadata = guard_metadata
+
+                        if suspected:
+                            pagination_stop_reason = "custom_url_first_page_broad_fallback_suspected"
+                            break
+                    except Exception:
+                        pass
 
                 if new_links_added <= 0:
                     consecutive_no_new_pages += 1
@@ -894,6 +1017,9 @@ def _fetch_with_playwright(url: str, crawl_mode: str = "quick") -> Tuple[str, Di
         "playwright_page_detail_counts": page_detail_counts[:20],
         "playwright_numeric_pagination_enabled": bool(is_deeper_crawl),
         "playwright_pagination_stop_reason": pagination_stop_reason,
+        "playwright_custom_url_guard": custom_url_guard_metadata,
+        "custom_url_broad_fallback_suspected_first_page": bool(custom_url_guard_metadata.get("custom_url_broad_fallback_suspected")),
+        "custom_url_target_evidence_count_first_page": custom_url_guard_metadata.get("custom_url_target_evidence_count"),
         "_captured_json_payloads": captured_json_payloads,
         "_debug_json_records": debug_json_records_sorted,
         "_candidate_response_urls": candidate_response_urls,
@@ -2837,23 +2963,31 @@ def scrape_speedhome_with_metadata(user_input: str, use_cache: bool = True, craw
 
         if cached_listings:
             cached_metadata = cached_entry.get("metadata", {}).copy()
-            lookup_seconds = max(0.0, time.perf_counter() - scrape_started_perf)
-            cached_metadata["cache_used"] = True
-            cached_metadata["fetch_method"] = cached_metadata.get("fetch_method", "cache")
-            cached_metadata["cache_retrieved_at"] = datetime.now().isoformat(timespec="seconds")
-            cached_metadata["cache_lookup_duration_seconds"] = round(lookup_seconds, 2)
-            cached_metadata["cache_lookup_duration_label"] = _format_duration(lookup_seconds)
-            cached_metadata["current_run_duration_seconds"] = round(lookup_seconds, 2)
-            cached_metadata["current_run_duration_label"] = _format_duration(lookup_seconds)
+            cached_suspected, cached_guard_metadata = _custom_url_broad_fallback_guard(url, cached_listings, cached_metadata)
 
-            # Older cache files may not have duration labels yet. Rebuild the label
-            # from stored seconds when possible so diagnostics remain readable.
-            if not cached_metadata.get("scrape_duration_label") and cached_metadata.get("scrape_duration_seconds") is not None:
-                cached_metadata["scrape_duration_label"] = _format_duration(cached_metadata.get("scrape_duration_seconds"))
+            if cached_suspected:
+                metadata.update(cached_guard_metadata)
+                metadata["notes"].append(
+                    "Ignored cached custom URL result because it looks like broad fallback cards for an unlisted or invalid rent slug."
+                )
+            else:
+                lookup_seconds = max(0.0, time.perf_counter() - scrape_started_perf)
+                cached_metadata["cache_used"] = True
+                cached_metadata["fetch_method"] = cached_metadata.get("fetch_method", "cache")
+                cached_metadata["cache_retrieved_at"] = datetime.now().isoformat(timespec="seconds")
+                cached_metadata["cache_lookup_duration_seconds"] = round(lookup_seconds, 2)
+                cached_metadata["cache_lookup_duration_label"] = _format_duration(lookup_seconds)
+                cached_metadata["current_run_duration_seconds"] = round(lookup_seconds, 2)
+                cached_metadata["current_run_duration_label"] = _format_duration(lookup_seconds)
 
-            return cached_listings, cached_metadata
+                # Older cache files may not have duration labels yet. Rebuild the label
+                # from stored seconds when possible so diagnostics remain readable.
+                if not cached_metadata.get("scrape_duration_label") and cached_metadata.get("scrape_duration_seconds") is not None:
+                    cached_metadata["scrape_duration_label"] = _format_duration(cached_metadata.get("scrape_duration_seconds"))
 
-        metadata["notes"].append("Existing empty cache entry ignored; refetching page.")
+                return cached_listings, cached_metadata
+
+        metadata["notes"].append("Existing empty or invalid cache entry ignored; refetching page.")
 
     allowed, robots_url, robots_policy_source = _robots_allowed(url)
 
@@ -2934,6 +3068,22 @@ def scrape_speedhome_with_metadata(user_input: str, use_cache: bool = True, craw
     )
 
     metadata.update(parser_metadata)
+
+    suspected_broad_fallback, guard_metadata = _custom_url_broad_fallback_guard(url, listings, metadata)
+    metadata.update(guard_metadata)
+
+    if suspected_broad_fallback:
+        metadata["notes"].append(
+            "Custom rent URL broad-fallback guard triggered: SPEEDHOME exposed a small reported target count, "
+            "but the rendered direct listing cards greatly exceeded that count and none of the listing cards "
+            "contained explicit evidence for the requested custom slug. No unrelated fallback dataset was accepted or cached."
+        )
+        metadata = _apply_live_scrape_timing(metadata)
+        raise SpeedhomeFetchError(
+            "This custom SPEEDHOME rent URL appears to render broader fallback listings instead of a reliable target dataset. "
+            "Please verify the URL slug or choose a suggested area/apartment. No unrelated listing dataset was reused.",
+            metadata=metadata,
+        )
 
     listings, metadata = _enrich_listings_from_detail_pages(
         listings=listings,
