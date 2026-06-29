@@ -881,6 +881,58 @@ def summarize_reported_vs_rendered(metadata: dict, collected_count: int) -> dict
 
 
 
+
+def is_invalid_custom_broad_fallback_result(input_value: str, target_df: pd.DataFrame, metadata: dict) -> tuple[bool, dict]:
+    """Detect invalid custom /rent URLs that render SPEEDHOME broad fallback cards.
+
+    The autocomplete suggestion list is not a scraping whitelist. Direct custom
+    SPEEDHOME /rent/<slug> URLs remain allowed. However, some non-existent or
+    typo slugs render a broad fallback page with hundreds of unrelated listing
+    cards while the SPEEDHOME headline reports only a tiny target count. That
+    should be rejected as "no reliable dataset", not accepted as market data.
+    """
+    try:
+        custom_outside_suggestions = bool(
+            is_speedhome_url_like(input_value)
+            and is_direct_speedhome_rent_url_outside_suggestions(input_value)
+        )
+    except Exception:
+        custom_outside_suggestions = False
+
+    if not custom_outside_suggestions:
+        return False, {
+            "custom_url_outside_suggestions": False,
+            "custom_url_broad_fallback_suspected": False,
+        }
+
+    target_df = target_df if isinstance(target_df, pd.DataFrame) else pd.DataFrame()
+    rendered_count = int(len(target_df))
+
+    strong_count = 0
+    if "target_area_match" in target_df.columns:
+        strong_count = int((target_df["target_area_match"].fillna("") == "Strong").sum())
+
+    reported_total = _safe_int((metadata or {}).get("source_reported_total_count"))
+    threshold = max(25, int(reported_total or 0) * 10) if reported_total is not None else None
+
+    suspicious = bool(
+        custom_outside_suggestions
+        and reported_total is not None
+        and reported_total <= 10
+        and rendered_count > threshold
+        and strong_count == 0
+    )
+
+    return suspicious, {
+        "custom_url_outside_suggestions": custom_outside_suggestions,
+        "custom_url_reported_total": reported_total,
+        "custom_url_rendered_count": rendered_count,
+        "custom_url_strong_target_evidence_count": strong_count,
+        "custom_url_broad_fallback_threshold": threshold,
+        "custom_url_broad_fallback_suspected": suspicious,
+    }
+
+
 def format_percent(value):
     if value is None:
         return "N/A"
@@ -1480,6 +1532,44 @@ else:
     st.info(
         f"Source-page card filter inactive: showing all {before_filter_count} scraped listing(s)."
     )
+
+
+# Reject invalid custom URL broad fallback results before any summary, history,
+# export, or charts are rendered. This catches both fresh scrape results and
+# stale Streamlit session/cache results from previous runs.
+suspicious_custom_fallback, custom_fallback_info = is_invalid_custom_broad_fallback_result(
+    analysis_input,
+    target_df,
+    metadata,
+)
+if suspicious_custom_fallback:
+    metadata = dict(metadata or {})
+    metadata.update(custom_fallback_info)
+    metadata.setdefault("notes", []).append(
+        "Rejected custom rent URL broad fallback result: small reported target count, large rendered card set, and zero strong target evidence."
+    )
+
+    clear_analysis_state()
+
+    st.error(
+        "No reliable listing dataset was found for this custom SPEEDHOME rent URL. "
+        "The page appears to render broader fallback listings instead of listings for the requested slug. "
+        "Please verify the URL or choose a suggested area/apartment."
+    )
+
+    with st.expander("Rejected custom URL diagnostics"):
+        st.write(f"Input: {analysis_input}")
+        st.write(f"Target URL: {normalized_url}")
+        st.write(f"Reported target count: {custom_fallback_info.get('custom_url_reported_total')}")
+        st.write(f"Rendered direct listing cards: {custom_fallback_info.get('custom_url_rendered_count')}")
+        st.write(f"Strong target evidence cards: {custom_fallback_info.get('custom_url_strong_target_evidence_count')}")
+        st.write(f"Broad fallback threshold: {custom_fallback_info.get('custom_url_broad_fallback_threshold')}")
+        st.write(f"Fetch method: {metadata.get('fetch_method', '-')}")
+        st.write(f"Cache used: {'Yes' if metadata.get('cache_used') else 'No'}")
+        st.write(f"Scrape time: {metadata.get('scrape_duration_label', '-')}")
+        st.write(f"Notes: {metadata.get('notes', [])}")
+
+    st.stop()
 
 
 # ---------------------------------------------------------------------
