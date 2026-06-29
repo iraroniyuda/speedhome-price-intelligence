@@ -814,12 +814,23 @@ def _fetch_with_playwright(url: str, crawl_mode: str = "quick") -> Tuple[str, Di
                 page_urls_fetched.append(page.url)
 
                 current_links = get_detail_links_on_page()
-                page_detail_counts.append(len(set(current_links)))
+                current_detail_count = len(set(current_links))
+                page_detail_counts.append(current_detail_count)
                 for link in current_links:
                     if link:
                         unique_detail_links_seen.add(str(link).split("?")[0].split("#")[0].rstrip("/"))
 
                 new_links_added = len(unique_detail_links_seen) - before_unique_count
+
+                # Fail fast for non-existent or empty custom /rent/<slug> pages.
+                # The autocomplete list is not a whitelist: custom SPEEDHOME rent
+                # URLs are still allowed. However, if the first rendered result
+                # page exposes zero direct /details/ listing links after waiting
+                # and scrolling, numeric pagination would only waste several
+                # minutes on typo/non-existent slugs such as /rent/new-area-2.
+                if page_number == 1 and current_detail_count == 0:
+                    pagination_stop_reason = "first_page_no_direct_listing_links"
+                    break
 
                 if new_links_added <= 0:
                     consecutive_no_new_pages += 1
@@ -2984,6 +2995,11 @@ def scrape_speedhome_with_metadata(user_input: str, use_cache: bool = True, craw
 
         _save_cache(cache)
     else:
+        if metadata.get("playwright_pagination_stop_reason") == "first_page_no_direct_listing_links":
+            metadata["notes"].append(
+                "No direct /details/ listing links were found on the first rendered result page. "
+                "The app stopped early to avoid long no-result pagination for a likely empty, typo, or non-existent rent URL."
+            )
         metadata["notes"].append("No listings parsed. Empty result was not cached.")
 
     return listings, metadata

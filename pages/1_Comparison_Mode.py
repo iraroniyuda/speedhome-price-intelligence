@@ -619,12 +619,16 @@ def render_custom_url_confirmation(selected_target_key: str) -> bool:
 
     st.warning(
         "This SPEEDHOME rent URL is not in the built-in suggestion list. "
-        "To avoid long no-result scrapes from typo or non-existent URLs in the public app, "
-        "unlisted custom rent URLs are blocked before scraping. Please choose a suggested area/apartment "
-        "or paste a SPEEDHOME /rent URL that matches one of the built-in suggestions."
+        "It may be a new valid SPEEDHOME page or a typo. Confirm before scraping. "
+        "If the page does not expose any public listing cards, the scraper will stop early and show diagnostics."
     )
-    st.session_state[confirm_key] = False
-    return False
+
+    return bool(
+        st.checkbox(
+            "I understand, continue with this custom SPEEDHOME rent URL",
+            key=confirm_key,
+        )
+    )
 
 
 # ---------------------------------------------------------------------
@@ -1573,15 +1577,9 @@ with left_col:
         elif not area_a_valid:
             st.session_state["comparison_area_a_scrape_in_progress"] = False
             st.warning("Please choose a valid Area A suggestion or paste a supported SPEEDHOME rent URL.")
-        elif st.session_state.get("comparison_area_a_target_custom_url_requires_confirmation", False):
-            st.session_state["comparison_area_a_scrape_in_progress"] = False
-            st.warning(
-                "Area A uses an unlisted custom SPEEDHOME rent URL, so scraping was not started. "
-                "Please choose a suggested area/apartment or paste a SPEEDHOME /rent URL that matches one of the built-in suggestions."
-            )
         elif not area_a_custom_url_ready:
             st.session_state["comparison_area_a_scrape_in_progress"] = False
-            st.warning("Please choose a valid Area A suggestion or supported SPEEDHOME rent URL before scraping.")
+            st.warning("Please confirm the custom SPEEDHOME rent URL for Area A before scraping.")
         elif not area_a_input or not str(area_a_input).strip():
             st.session_state["comparison_area_a_scrape_in_progress"] = False
             st.warning("Area A input cannot be empty.")
@@ -1703,15 +1701,9 @@ with right_col:
         elif not area_b_valid:
             st.session_state["comparison_area_b_scrape_in_progress"] = False
             st.warning("Please choose a valid Area B suggestion or paste a supported SPEEDHOME rent URL.")
-        elif st.session_state.get("comparison_area_b_target_custom_url_requires_confirmation", False):
-            st.session_state["comparison_area_b_scrape_in_progress"] = False
-            st.warning(
-                "Area B uses an unlisted custom SPEEDHOME rent URL, so scraping was not started. "
-                "Please choose a suggested area/apartment or paste a SPEEDHOME /rent URL that matches one of the built-in suggestions."
-            )
         elif not area_b_custom_url_ready:
             st.session_state["comparison_area_b_scrape_in_progress"] = False
-            st.warning("Please choose a valid Area B suggestion or supported SPEEDHOME rent URL before scraping.")
+            st.warning("Please confirm the custom SPEEDHOME rent URL for Area B before scraping.")
         elif not area_b_input or not str(area_b_input).strip():
             st.session_state["comparison_area_b_scrape_in_progress"] = False
             st.warning("Area B input cannot be empty.")
