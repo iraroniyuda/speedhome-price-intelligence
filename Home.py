@@ -1274,20 +1274,11 @@ with st.sidebar:
             st.session_state["main_scrape_start_requested"] = True
             st.rerun()
 
-    if render_confirmed_action_button(
-        "Clear App Cache",
-        "Clear Streamlit cache, local SPEEDHOME cache, scrape history, and the current analysis state?",
-        "main_clear_app_cache",
-        confirm_label="Yes, Clear",
-        cancel_label="Keep Cache",
-        disabled=main_scrape_busy,
-    ):
-        st.cache_data.clear()
-        clear_speedhome_cache()
-        clear_scrape_history()
-        clear_analysis_state()
-        st.success("Streamlit cache, local SPEEDHOME cache, scrape history, and current analysis state cleared.")
-        st.rerun()
+    # Public deployment safety:
+    # Cache/history reset is intentionally not exposed in the public app.
+    # The deployed assessment version relies on committed fallback datasets, so
+    # a random visitor should not be able to delete runtime cache/history files.
+    st.caption("Cache reset is disabled in the public deployed version to preserve fallback datasets.")
 
 
 # ---------------------------------------------------------------------

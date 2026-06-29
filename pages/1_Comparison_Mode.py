@@ -1473,21 +1473,11 @@ with st.sidebar:
             "A comparison scrape is currently running. Cache/reset actions are locked to avoid interrupting the run."
         )
 
-    if render_confirmed_action_button(
-        "Clear Comparison Cache",
-        "Clear comparison cache, local SPEEDHOME cache, scrape history, and both Area A/B results?",
-        "comparison_clear_cache",
-        confirm_label="Yes, Clear",
-        cancel_label="Keep Cache",
-        disabled=comparison_scrape_busy,
-    ):
-        st.cache_data.clear()
-        clear_speedhome_cache()
-        clear_scrape_history()
-        clear_area_a_result()
-        clear_area_b_result()
-        st.success("Comparison cache, local SPEEDHOME cache, scrape history, and current comparison results cleared.")
-        st.rerun()
+    # Public deployment safety:
+    # Cache/history reset is intentionally not exposed in the public app.
+    # The deployed assessment version relies on committed fallback datasets, so
+    # a random visitor should not be able to delete runtime cache/history files.
+    st.caption("Cache reset is disabled in the public deployed version to preserve fallback datasets.")
 
     if render_confirmed_action_button(
         "Reset Comparison Page",
