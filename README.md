@@ -824,3 +824,10 @@ Potential improvements:
 Built by **Ira Roni Yuda**.
 
 This project demonstrates practical data-product thinking across scraping, data cleaning, analytics, UX, export, diagnostics, and business-oriented decision support.
+
+## Live Demo
+
+Public app link:
+
+https://speedhome-price-intelligence-ira-roni.streamlit.app
+
